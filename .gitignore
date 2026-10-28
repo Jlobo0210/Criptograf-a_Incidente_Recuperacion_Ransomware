@@ -1,0 +1,70 @@
+
+# ==============================
+# Python
+# ==============================
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# ==============================
+# Entornos virtuales
+# ==============================
+.venv/
+venv/
+env/
+ENV/
+
+# ==============================
+# Variables de entorno y secretos
+# ==============================
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+
+# ==============================
+# Estado y datos persistentes
+# ==============================
+servidor/datos/*
+!servidor/datos/.gitkeep
+state/
+*.sqlite3
+*.db
+
+# ==============================
+# Pruebas: resultados generados
+# ==============================
+pruebas/originales/*
+pruebas/recuperados_pago/*
+pruebas/recuperados_investigacion/*
+pruebas/recuperados_mitm/*
+
+# ==============================
+# Archivos temporales
+# ==============================
+*.tmp
+*.log
+*.bak
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ==============================
+# IDE y herramientas
+# ==============================
+.vscode/
+.idea/
+
+# ==============================
+# Git y Docker
+# ==============================
+.git/
