@@ -36,6 +36,7 @@ ENV/
 # ==============================
 servidor/datos/*
 !servidor/datos/.gitkeep
+mitm/datos/
 state/
 *.sqlite3
 *.db
