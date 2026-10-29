@@ -2,7 +2,7 @@
 
 Simulación de laboratorio de un incidente de ransomware (Modelo B): la víctima genera la semilla maestra `sV` y la entrega al servidor con RSA-OAEP. Incluye recuperación por pago, recuperación por investigación, un intermediario MITM y una defensa con firmas digitales.
 
-Este archivo explica cómo ejecutar el proyecto. El protocolo del servidor y el formato de los datos están en [`docs/protocolo_servidor.md`](docs/protocolo_servidor.md). El diseño, las mediciones y los resultados están en el informe PDF.
+Este archivo explica cómo ejecutar el proyecto. El diseño, el protocolo, las mediciones y los resultados están en el informe en PDF (`informe/informe.pdf`), que se incluye en el ZIP de entrega.
 
 ## Estado del proyecto
 
@@ -11,9 +11,9 @@ Este archivo explica cómo ejecutar el proyecto. El protocolo del servidor y el 
 | `servidor/` | Terminado: registro, entrega de `sV`, persistencia, reinicio, pago y firma de `pkS` |
 | `comun/crypto_common.py`, `comun/transporte.py` | Terminado |
 | `comun/firmas.py`, `pruebas/test_firmas.py` | Terminado (3 pruebas en `ok`) |
-| `mitm/` | Parcial: sustituye `pkS` por `pkM`, pero aún no abre ni reenvía la maestra (M3) ni descifra las copias (M6) |
-| `victima/` | Pendiente |
-| `investigacion/` | Pendiente |
+| `mitm/` | Terminado: sustitución de `pkS` por `pkM` (M2), intercepción y reenvío de la maestra (M3–M4), descifrado de copias (M6) y modo de firma propia para la prueba 4 (`--firmar-pkm`) |
+| `victima/` | Terminado: registro, verificación de firma, entrega de `sV`, cifrado y recuperación por pago |
+| `investigacion/` | Terminado: recuperación de `sV` por fuerza bruta (5b) con mediciones |
 | `comun/generador_semillas.py` | Entregado por el profesor, sin modificar |
 
 
@@ -140,11 +140,11 @@ docker compose -p p1 logs servidor
 docker compose -p p1 logs servidor > evidencias\p1_pago\logs\servidor.log
 ```
 
-> **Pendiente (Persona 2):** ajustar los comandos de `victima.py` (subcomandos y opciones) del paso c) y de las pruebas cuando el cliente definitivo esté terminado.
+> Los comandos de `victima.py` de arriba son los definitivos: subcomando `cifrar` (pasos 1–3) y `recuperar-pago` (5a y 6), con las opciones `--id`, `--host` (por defecto `127.0.0.1`), `--puerto`, `--entrada`, `--salida` y, para la prueba de MITM, `--sin-firmas`.
 
 ### Comprobar el servidor sin la víctima
 
-Mientras `victima.py` no esté terminado, `scratch_cliente_prueba.py` hace el recorrido completo contra el servidor: registro, verificación de la firma de `pkS`, entrega de una semilla de prueba y recuperación por pago. Requiere haber hecho el paso b).
+Como comprobación rápida del servidor sin la víctima, `scratch_cliente_prueba.py` hace el recorrido completo contra el servidor: registro, verificación de la firma de `pkS`, entrega de una semilla de prueba y recuperación por pago. Requiere haber hecho el paso b).
 
 ```powershell
 python scratch_cliente_prueba.py
@@ -189,7 +189,7 @@ python investigacion\investigar.py --entrada evidencias\p2_investigacion\cifrado
 
 La investigación solo lee los archivos cifrados y sus metadatos. No accede a `servidor/datos`, al volumen del servidor, a claves privadas ni a los resultados de la prueba 1.
 
-> **Pendiente (Persona 2):** confirmar el nombre y las opciones de `investigar.py`, y describir el contenido de `mediciones.csv`.
+> `investigar.py` recibe `--entrada` (carpeta de cifrados), `--salida` (recuperados) y `--mediciones` (CSV); admite además `--procesos` y `--bits` (por defecto 16 procesos y 24 bits). El `mediciones.csv` registra el entorno, los procesos, el espacio de búsqueda, el archivo oráculo, la semilla encontrada, los candidatos probados y los tiempos de recuperar `sV` y de descifrar.
 
 ### Prueba 3. MITM (M1–M6)
 
@@ -211,10 +211,12 @@ Al terminar, con víctima y servidor cerrados (M5):
 docker compose -p p3 logs servidor > evidencias\p3_mitm\logs\servidor.log
 docker compose -p p3 stop servidor
 docker compose -p p3 logs mitm > evidencias\p3_mitm\logs\mitm.log
-# M6: recuperación por el intermediario con la maestra interceptada
+# M6: recuperación por el intermediario con la maestra interceptada.
+# Tomar la semilla del log del intermediario (línea "M3: ... sV = <hex>") y descifrar las copias:
+python mitm\mitm.py descifrar --id v-p3 --sv <hex-de-sV> --entrada evidencias\p3_mitm\cifrados --salida evidencias\p3_mitm\recuperados_mitm
 ```
 
-> **Pendiente (conjunto):** hoy `mitm.py` solo hace M2 (sustituye `pkS` por `pkM` en `registro_ok`). Descarta `skM` y reenvía la entrega de la víctima sin abrirla, así que el servidor responde `No se pudo desencapsular la semilla: Incorrect decryption.` y la prueba no puede completarse. Falta: conservar `skM`, abrir la entrega con `skM`, guardar `sV`, volver a cifrarla con `pkS` y reenviarla (M3–M4), y un comando para descifrar las copias con la maestra interceptada (M6). Completar aquí el comando de M6.
+> El intermediario conserva `skM`, abre la entrega de la víctima, guarda `sV` (la imprime en su traza como `sV = <hex>` y la escribe en `mitm/datos/<idV>.json`) y la re-cifra con la `pkS` real antes de reenviarla al servidor (M3–M4). El subcomando `descifrar` recupera las copias con esa maestra, con el servidor apagado (M6).
 
 ### Prueba 4. Firmas digitales
 
@@ -232,11 +234,29 @@ Se ejecuta tres veces, cada una con un `idV` nuevo:
 | Firma propia del intermediario | `v-p4-firma-mitm` | `5001` | Rechazo: la firma es del intermediario y no verifica con la clave de confianza copiada en el paso b) |
 | Intercambio legítimo | `v-p4-legitima` | `5000` | Cifrado, reinicio y recuperación por pago completos |
 
-Comprobado con el intermediario actual: en el primer caso `verificar_firma_clave` devuelve `False` porque el intermediario cambia `pks_n`/`pks_e` pero conserva la firma original del servidor.
+Comandos de la víctima para cada caso (la víctima verifica firmas; **no** se usa `--sin-firmas`):
 
-> **Pendiente (conjunto):** el segundo caso requiere un modo de `mitm.py` que firme `pkM` con una clave de firma propia (y adjunte su clave de verificación). La defensa en sentido contrario (el servidor autentica la clave de la víctima) aún no está implementada; ver `docs/protocolo_servidor.md`.
+```powershell
+# Caso 1 — sustitución de clave (intermediario por defecto en 5001): debe RECHAZAR
+python victima\victima.py cifrar --id v-p4-mitm --puerto 5001 --entrada evidencias\p4_firmas\trabajo --salida evidencias\p4_firmas\cifrados_caso1
 
-> **Pendiente (Persona 2):** comandos de la víctima para los tres casos.
+# Caso 3 — intercambio legítimo (servidor directo en 5000): debe COMPLETAR
+python victima\victima.py cifrar --id v-p4-legitima --puerto 5000 --entrada evidencias\p4_firmas\trabajo --salida evidencias\p4_firmas\cifrados_legitima
+```
+
+Para el **caso 2** el intermediario debe firmar `pkM` con su propia clave. Relanzarlo en ese modo (flag `--firmar-pkm`, equivalente a la variable `MITM_FIRMAR_PKM=1`) y conectar la víctima:
+
+```powershell
+docker compose -p p4 stop mitm            # liberar el puerto 5001
+$env:SERVIDOR_HOST = "127.0.0.1"; $env:SERVIDOR_PORT = "5000"
+python mitm\mitm.py proxy --firmar-pkm    # intermediario en modo "firma propia" (en el host)
+# en otra terminal:
+python victima\victima.py cifrar --id v-p4-firma-mitm --puerto 5001 --entrada evidencias\p4_firmas\trabajo --salida evidencias\p4_firmas\cifrados_caso2
+```
+
+En los dos casos de ataque la víctima rechaza antes de enviar la semilla: en el caso 1 porque el intermediario cambia `pks_n`/`pks_e` pero conserva la firma original del servidor; en el caso 2 porque la víctima verifica contra la clave de confianza del servidor real (copiada en el paso b), no contra la que entrega el intermediario. El registro del servidor debe mostrar `v-p4-mitm` y `v-p4-firma-mitm` **sin** semilla, y `v-p4-legitima` con `Semilla maestra recibida y guardada`.
+
+> Nota: la defensa en sentido contrario (que el servidor autentique la clave de la víctima) no se implementó; no la exige ninguna de las tres pruebas de firmas.
 
 ## 6. Comparar recuperados con originales
 
