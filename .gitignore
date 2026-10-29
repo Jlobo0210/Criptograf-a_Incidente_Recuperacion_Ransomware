@@ -48,6 +48,7 @@ pruebas/originales/*
 pruebas/recuperados_pago/*
 pruebas/recuperados_investigacion/*
 pruebas/recuperados_mitm/*
+evidencias/
 
 # ==============================
 # Archivos temporales
