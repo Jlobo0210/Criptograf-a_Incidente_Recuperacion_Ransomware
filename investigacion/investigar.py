@@ -33,6 +33,19 @@ El costo de verificar GCM crece con el tamaño del ciphertext, así que como
 oráculo se usa el archivo cifrado más pequeño (no necesariamente i = 0):
 cualquier archivo sirve, porque su Ki y su AAD se derivan de su propio i.
 El rango [0, 2**24) se reparte entre varios procesos (multiprocessing).
+
+Medida del trabajo
+------------------
+La búsqueda recorre los candidatos en orden creciente, así que para llegar a
+la semilla s hace falta haber probado, como mínimo, s + 1 candidatos. Esa es
+la medida que se reporta ("candidatos_hasta_semilla"). En modo multiproceso
+otros procesos pueden haber probado algunos candidatos más allá de s antes de
+detenerse; esos no se cuentan.
+
+Estimación teórica (el generador NO es uniforme en [0, 2**24)):
+    c ~ Uniforme{16..24},  v ~ Uniforme[0, 2**c)
+    E[v] = (1/9) * sum_{c=16}^{24} (2**c - 1) / 2  ~ 1.86 millones
+    mediana(v) ~ 399 000;  P(v < 2**16) ~ 22 %;  peor caso = 2**24.
 """
 
 import sys
@@ -49,11 +62,37 @@ from pathlib import Path
 sys.path.append(str(Path(__file__).resolve().parent.parent))
 
 from comun.crypto_common import derivar_clave_Ki, construir_aad, descifrar_con_aad
+from comun.archivos import nombre_seguro
 
 from Crypto.Cipher import AES
 
 
 BITS_MAXIMOS = 24  # Cota del generador suministrado: toda semilla es < 2**24.
+
+
+# ---------------------------------------------------------------------------
+# Estimación teórica del trabajo según la distribución del generador
+# ---------------------------------------------------------------------------
+
+CONFIGURACIONES = range(16, 25)  # secrets.randbelow(9) + 16
+
+
+def probabilidad_acumulada(x):
+    """P(v <= x) para la distribución del generador suministrado."""
+    return sum(min(1.0, (x + 1) / (1 << c)) for c in CONFIGURACIONES) / len(CONFIGURACIONES)
+
+
+def estimacion_teorica():
+    """Valor esperado y mediana del número de candidatos (semilla + 1)."""
+    esperado = sum(((1 << c) - 1) / 2 for c in CONFIGURACIONES) / len(CONFIGURACIONES) + 1
+    lo, hi = 0, (1 << max(CONFIGURACIONES)) - 1
+    while lo < hi:
+        medio = (lo + hi) // 2
+        if probabilidad_acumulada(medio) >= 0.5:
+            hi = medio
+        else:
+            lo = medio + 1
+    return esperado, lo + 1
 
 
 # ---------------------------------------------------------------------------
@@ -197,7 +236,7 @@ def descifrar_todos(cifrados, sV, carpeta_salida):
             fallidos.append(c["nombre_original"])
             print(f"  [i={c['i']}] {c['nombre_original']}: ETIQUETA INVÁLIDA")
             continue
-        (carpeta_salida / c["nombre_original"]).write_bytes(claro)
+        (carpeta_salida / nombre_seguro(c["nombre_original"])).write_bytes(claro)
         recuperados += 1
         print(f"  [i={c['i']}] {c['nombre_original']}: OK")
     return recuperados, fallidos
@@ -227,7 +266,8 @@ def main():
     parser.add_argument("--salida", required=True, help="Carpeta para los archivos recuperados.")
     parser.add_argument("--mediciones", default=None, help="Ruta del CSV de mediciones (opcional).")
     parser.add_argument("--procesos", type=int, default=mp.cpu_count(),
-                        help="Procesos en paralelo (1 = escaneo lineal exacto).")
+                        help="Procesos en paralelo (por defecto, el número de "
+                             "núcleos; 1 = escaneo lineal).")
     parser.add_argument("--bits", type=int, default=BITS_MAXIMOS,
                         help=f"Bits del espacio de búsqueda (por defecto {BITS_MAXIMOS}).")
     args = parser.parse_args()
@@ -259,10 +299,19 @@ def main():
         sys.exit(1)
 
     sV = semilla_candidata(semilla)
-    tasa = probados / t_sv if t_sv > 0 else 0
+    # Medida del trabajo: posición de la semilla en el recorrido creciente.
+    candidatos = semilla + 1
+    tasa = candidatos / t_sv if t_sv > 0 else 0
+    esperado, mediana = estimacion_teorica()
+    peor_caso_s = espacio / tasa if tasa > 0 else 0
     print(f"\nSemilla encontrada: {semilla} (0x{semilla:06x})")
-    print(f"Candidatos probados: {probados}")
+    print(f"Candidatos hasta la semilla (semilla + 1): {candidatos}")
     print(f"Tiempo de recuperación de sV: {t_sv:.3f} s  ({tasa:,.0f} candidatos/s)")
+    print(f"Estimación teórica: esperado ~{esperado:,.0f} candidatos, "
+          f"mediana ~{mediana:,} (percentil de esta semilla: "
+          f"{probabilidad_acumulada(semilla):.0%})")
+    print(f"Peor caso estimado a esta tasa: 2**{args.bits} / tasa = "
+          f"{peor_caso_s:.0f} s ({peor_caso_s / 60:.1f} min)")
 
     print("\nDescifrando archivos con la semilla recuperada...")
     t1 = time.perf_counter()
@@ -284,9 +333,13 @@ def main():
             "oraculo_i": oraculo["i"],
             "oraculo_bytes": len(oraculo["ciphertext"]),
             "semilla_int": semilla,
-            "candidatos_probados": probados,
+            "candidatos_hasta_semilla": candidatos,
+            "percentil_semilla": round(probabilidad_acumulada(semilla), 4),
+            "esperado_teorico": round(esperado),
+            "mediana_teorica": mediana,
             "tiempo_recuperar_sv_s": round(t_sv, 3),
             "candidatos_por_s": round(tasa, 1),
+            "peor_caso_estimado_s": round(peor_caso_s, 1),
             "archivos": len(cifrados),
             "tiempo_descifrar_s": round(t_descifrado, 3),
             "tiempo_total_s": round(t_sv + t_descifrado, 3),

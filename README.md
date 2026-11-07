@@ -1,21 +1,8 @@
 # Actividad III: Del incidente a la recuperación
 
-Simulación de laboratorio de un incidente de ransomware (Modelo B): la víctima genera la semilla maestra `sV` y la entrega al servidor con RSA-OAEP. Incluye recuperación por pago, recuperación por investigación, un intermediario MITM y una defensa con firmas digitales.
+Simulación de laboratorio de un incidente de ransomware (Modelo B): la víctima genera la semilla maestra `sV` y la entrega al servidor con RSA-OAEP. Incluye recuperación por pago, recuperación por investigación, un intermediario MITM y una defensa con firmas digitales en los dos sentidos (la víctima autentica `pkS` y el servidor autentica `pkV`).
 
-Este archivo explica cómo ejecutar el proyecto. El diseño, el protocolo, las mediciones y los resultados están en el informe en PDF (`informe/informe.pdf`), que se incluye en el ZIP de entrega.
-
-## Estado del proyecto
-
-| Componente | Estado |
-|---|---|---|
-| `servidor/` | Terminado: registro, entrega de `sV`, persistencia, reinicio, pago y firma de `pkS` |
-| `comun/crypto_common.py`, `comun/transporte.py` | Terminado |
-| `comun/firmas.py`, `pruebas/test_firmas.py` | Terminado (3 pruebas en `ok`) |
-| `mitm/` | Terminado: sustitución de `pkS` por `pkM` (M2), intercepción y reenvío de la maestra (M3–M4), descifrado de copias (M6) y modo de firma propia para la prueba 4 (`--firmar-pkm`) |
-| `victima/` | Terminado: registro, verificación de firma, entrega de `sV`, cifrado y recuperación por pago |
-| `investigacion/` | Terminado: recuperación de `sV` por fuerza bruta (5b) con mediciones |
-| `comun/generador_semillas.py` | Entregado por el profesor, sin modificar |
-
+Este archivo explica cómo ejecutar el proyecto. El diseño, el protocolo, las mediciones y los resultados están en `Informe.pdf`.
 
 ## Estructura
 
@@ -24,34 +11,35 @@ comun/
   crypto_common.py        RSA-OAEP, Ki = HMAC-SHA256(sV, i), AES-256-GCM con AAD
   transporte.py           Framing TCP (longitud de 4 bytes) + mensajes JSON
   firmas.py               Firma RSA-PSS de claves públicas y verificación
-  generador_semillas.py   Generador suministrado por el profesor (sin cambios)  
+  archivos.py             Nombre seguro para escribir los archivos recuperados
+  generador_semillas.py   Generador suministrado por el profesor (sin cambios)
 servidor/
   servidor.py             Servidor (puerto 5000)
   Dockerfile
-  datos/                  Claves y registro del servidor (se generan solos; en Docker viven en un volumen)
+  datos/                  Claves, registro y confianza_victimas/ (en Docker viven en un volumen)
 victima/
-  victima.py              Cliente de la víctima                                 
-  datos/                  Clave de confianza clave_firma_publica.pem y datos de la víctima
+  victima.py              Cliente de la víctima (subcomandos preparar, cifrar, recuperar-pago)
+  Dockerfile
+  datos/                  Clave de confianza del servidor y, por idV, los pares RSA de la víctima
 mitm/
   mitm.py                 Intermediario (puerto 5001)
   Dockerfile
+  datos/                  Maestras interceptadas (<idV>.json)
 investigacion/
-  investigar.py           Recuperación de sV sin el servidor (paso 5b)          
+  investigar.py           Recuperación de sV sin el servidor (paso 5b)
 pruebas/
-  test_firmas.py          Pruebas unitarias de firmas
+  test_firmas.py                  Firma de pkS (víctima autentica al servidor)
+  test_autenticacion_victima.py   Firma de pkV (servidor autentica a la víctima) y nombres seguros
 scratch_cliente_prueba.py Cliente mínimo para probar el servidor sin la víctima
-docker-compose.yml        Servicios servidor y mitm
-.dockerignore             Evita copiar servidor/datos/ a la imagen
+docker-compose.yml        Servicios servidor, mitm y victima en la red interna "laboratorio"
 requirements.txt          pycryptodome==3.23.0
 evidencias/               Resultados de cada prueba (se crea al preparar las pruebas)
 ```
 
-`comun/generador_semillas.py` es el generador suministrado y no se modifica.
-
 ## 1. Requisitos
 
 - Docker Desktop en ejecución, con `docker compose`.
-- Python 3.12 en el equipo anfitrión (para la víctima, la investigación y las pruebas unitarias).
+- Python 3.12 en el equipo anfitrión, solo para la investigación (paso 5b), el descifrado del MITM (M6) y las pruebas unitarias.
 
 ```powershell
 docker --version
@@ -61,7 +49,7 @@ python --version
 
 ## 2. Preparar el entorno
 
-Todos los comandos se ejecutan desde la carpeta que contiene `docker-compose.yml`.
+Todos los comandos se ejecutan en PowerShell desde la carpeta que contiene `docker-compose.yml`.
 
 ```powershell
 python -m venv .venv
@@ -69,204 +57,203 @@ python -m venv .venv
 python -m pip install -r requirements.txt
 ```
 
-Comprobar el módulo de firmas:
-
-```powershell
-python -m unittest pruebas.test_firmas -v
-```
-
-Los tres casos (`test_firma_valida`, `test_rechaza_clave_sustituida`, `test_rechaza_identidad_distinta`) deben terminar en `ok`. Guardar la salida como evidencia:
+Pruebas unitarias (12 casos, todos deben terminar en `ok`):
 
 ```powershell
 New-Item -ItemType Directory -Force evidencias | Out-Null
-python -m unittest pruebas.test_firmas -v 2>&1 | Tee-Object evidencias\test_firmas.txt
+python -m unittest pruebas.test_firmas pruebas.test_autenticacion_victima -v 2>&1 | Tee-Object evidencias\pruebas_unitarias.txt
 ```
 
 ## 3. Separar los datos de cada prueba
 
-Cada prueba usa su propio proyecto de Compose (`-p`), y por tanto su propio volumen de servidor (`<proyecto>_servidor_datos`) con su propio par RSA, su propia clave de firma y su propio registro. Cada prueba tiene además su propia carpeta de evidencias. Así una prueba no reutiliza el registro ni la semilla de otra.
+Cada prueba usa su propio proyecto de Compose (`-p`) y por tanto su propio volumen de servidor (`<proyecto>_servidor_datos`), con su propio par RSA, su propia clave de firma y su propio registro. Cada prueba tiene además su propia carpeta de evidencias y su propio `idV`.
 
 | Prueba | Proyecto Compose | Carpeta de evidencias | idV |
 |---|---|---|---|
 | 1. Cifrado y pago | `p1` | `evidencias\p1_pago` | `v-p1` |
 | 2. Investigación | (sin servidor; usa copias de `p1`) | `evidencias\p2_investigacion` | `v-p1` |
 | 3. MITM | `p3` | `evidencias\p3_mitm` | `v-p3` |
-| 4. Firmas | `p4` | `evidencias\p4_firmas` | `v-p4-mitm`, `v-p4-firma-mitm`, `v-p4-legitima` |
+| 4. Firmas | `p4` | `evidencias\p4_firmas` | `v-p4-mitm`, `v-p4-firma-mitm`, `v-p4-pkv`, `v-p4-legitima` |
 
-> **Importante:** los proyectos publican los mismos puertos (`5000` y `5001`), así que **solo puede haber uno en marcha a la vez**. Antes de levantar `p3`, detener `p1` con `docker compose -p p1 stop`. Si `up` falla con `port is already allocated`, detener el otro proyecto y repetir el `up`; si el contenedor quedó creado sin puertos, ejecutar `docker compose -p p3 down` (sin `-v`) y volver a levantarlo.
-
-Crear las carpetas y los archivos de trabajo (ejemplo para la prueba 1; repetir cambiando `$P` para `p3_mitm` y `p4_firmas`):
-
-```powershell
-$P = "evidencias\p1_pago"
-New-Item -ItemType Directory -Force "$P\originales", "$P\trabajo", "$P\cifrados", "$P\recuperados", "$P\logs" | Out-Null
-
-# Archivos de prueba: uno de texto y uno binario de 1 MiB
-"Documento de prueba de la Actividad III" | Set-Content "$P\originales\documento.txt"
-$bytes = New-Object byte[] 1048576; (New-Object Random 42).NextBytes($bytes)
-[IO.File]::WriteAllBytes("$PWD\$P\originales\binario.bin", $bytes)
-
-# La víctima trabaja sobre copias; los originales se reservan para comparar
-Copy-Item "$P\originales\*" "$P\trabajo\"
-```
+> **Importante:** todos los proyectos publican los puertos `5000` y `5001` en `127.0.0.1`, así que **solo puede haber uno en marcha a la vez**. Antes de levantar uno, detener el anterior con `docker compose -p <anterior> stop`.
 
 > **Importante:** no usar `docker compose down -v` hasta terminar una prueba: `-v` borra el volumen con el registro y las claves del servidor, y la recuperación por pago deja de ser posible.
 
-## 4. Patrón común de cada prueba
-
-Todas las pruebas con servidor siguen los mismos pasos. Abajo solo se indica lo que cambia.
+Crear las carpetas y los archivos de trabajo de las tres pruebas con servidor:
 
 ```powershell
-# a) Levantar los servicios de la prueba (la primera vez construye las imágenes)
-docker compose -p p1 up --build -d servidor mitm
-docker compose -p p1 logs servidor
-#    Debe mostrar: "Clave RSA del servidor generada y guardada.",
-#    "Clave RSA de firma generada y guardada." y "Servidor escuchando en 0.0.0.0:5000"
-
-# b) Copiar la clave pública de firma del servidor a la víctima (canal de confianza).
-#    Cada proyecto genera su propia clave de firma: repetir este paso en cada prueba.
-docker compose -p p1 cp servidor:/app/servidor/datos/clave_firma_publica.pem victima\datos\
-
-# c) Ejecutar la víctima (registro, entrega de sV y cifrado: pasos 1-3)
-python victima\victima.py cifrar --id v-p1 --puerto 5000 --entrada evidencias\p1_pago\trabajo --salida evidencias\p1_pago\cifrados
-
-# d) Cerrar y reiniciar (paso 4). El servidor recarga su par RSA y el registro desde el volumen.
-docker compose -p p1 stop
-docker compose -p p1 start
-docker compose -p p1 logs servidor
-#    Tras el reinicio debe mostrar "Clave RSA del servidor cargada." y "Clave RSA de firma cargada."
-
-# e) Guardar las trazas
-docker compose -p p1 logs servidor > evidencias\p1_pago\logs\servidor.log
+foreach ($P in "evidencias\p1_pago", "evidencias\p3_mitm", "evidencias\p4_firmas") {
+    New-Item -ItemType Directory -Force "$P\originales", "$P\trabajo", "$P\logs" | Out-Null
+    # Archivos de prueba: uno de texto y uno binario de 1 MiB
+    "Documento de prueba de la Actividad III" | Set-Content "$P\originales\documento.txt"
+    $bytes = New-Object byte[] 1048576; (New-Object Random 42).NextBytes($bytes)
+    [IO.File]::WriteAllBytes("$PWD\$P\originales\binario.bin", $bytes)
+    # La víctima trabaja sobre copias; los originales se reservan para comparar
+    Copy-Item "$P\originales\*" "$P\trabajo\"
+}
 ```
 
-> Los comandos de `victima.py` de arriba son los definitivos: subcomando `cifrar` (pasos 1–3) y `recuperar-pago` (5a y 6), con las opciones `--id`, `--host` (por defecto `127.0.0.1`), `--puerto`, `--entrada`, `--salida` y, para la prueba de MITM, `--sin-firmas`.
+## 4. Patrón común de cada prueba
+
+Todas las pruebas con servidor siguen estos pasos. Abajo, en cada prueba, solo se indica lo que cambia. La víctima corre en su propio contenedor (`docker compose run --rm victima …`) y llega al servidor por la red interna con `--host servidor` o al intermediario con `--host mitm --puerto 5001`. Las rutas que recibe la víctima usan `/` porque se resuelven dentro del contenedor.
+
+```powershell
+# a) Construir las imágenes del proyecto (servidor, mitm y victima) y levantar servidor e intermediario
+docker compose -p p1 --profile cli build
+docker compose -p p1 up -d servidor mitm
+docker compose -p p1 logs servidor
+#    Debe mostrar "Clave RSA del servidor generada y guardada.",
+#    "Clave RSA de firma generada y guardada." y "Servidor escuchando en 0.0.0.0:5000"
+
+# b) Canal de confianza, sentido servidor -> víctima:
+#    copiar la clave pública de firma del servidor a la víctima.
+#    Cada proyecto genera su propia clave de firma: repetir en cada prueba.
+docker compose -p p1 cp servidor:/app/servidor/datos/clave_firma_publica.pem victima\datos\
+
+# c) Canal de confianza, sentido víctima -> servidor:
+#    generar los pares de la víctima y copiar su clave de verificación al servidor.
+docker compose -p p1 run --rm victima preparar --id v-p1
+docker compose -p p1 cp victima\datos\v-p1\clave_firma_publica.pem servidor:/app/servidor/datos/confianza_victimas/v-p1.pem
+
+# d) Víctima: registro con pkV firmada, verificación de pkS, entrega de sV y cifrado (pasos 1-3)
+docker compose -p p1 run --rm victima cifrar --id v-p1 --host servidor --entrada evidencias/p1_pago/trabajo --salida evidencias/p1_pago/cifrados
+
+# e) Cerrar y reiniciar (paso 4). El servidor recarga su par RSA, su clave de firma,
+#    las claves de confianza y el registro desde el volumen.
+docker compose -p p1 stop
+docker compose -p p1 start servidor
+docker compose -p p1 logs servidor
+#    Tras el reinicio debe mostrar "Clave RSA del servidor cargada." y "Clave RSA de firma cargada."
+```
+
+Subcomandos de `victima.py`: `preparar --id` (genera el par de cifrado y el de firma), `cifrar` (pasos 1–3) y `recuperar-pago` (5a y 6), con `--id`, `--host` (por defecto `127.0.0.1`), `--puerto` (por defecto `5000`), `--entrada`, `--salida` y, solo en la prueba de MITM, `--sin-firmas`.
 
 ### Comprobar el servidor sin la víctima
 
-Como comprobación rápida del servidor sin la víctima, `scratch_cliente_prueba.py` hace el recorrido completo contra el servidor: registro, verificación de la firma de `pkS`, entrega de una semilla de prueba y recuperación por pago. Requiere haber hecho el paso b).
+`scratch_cliente_prueba.py` hace el recorrido completo contra el servidor (registro firmado, verificación de `pkS`, entrega de una semilla de prueba y pago). Requiere el paso b) y, para `v-prueba-003`, el paso c) con `python victima\victima.py preparar --id v-prueba-003` y la copia de su clave al servidor. Solo funciona una vez por volumen, porque el servidor acepta una sola entrega por `idV`.
 
 ```powershell
 python scratch_cliente_prueba.py
 ```
 
-Salida esperada:
-
-```text
-Registro: {'tipo': 'registro_ok', 'pks_n': '...', 'pks_e': 65537, 'pks_firma': '...'}
-Firma del servidor verificada correctamente.
-Entrega: {'tipo': 'entrega_ok', 'idV': 'v-prueba-003'}
-Recuperación por pago OK — la semilla coincide.
-```
-
-El script usa un `idV` fijo y genera un par RSA nuevo en cada ejecución. Repetirlo contra el mismo volumen devuelve `El ID ya está registrado con otra clave pública.`, que es el comportamiento correcto del servidor. Para repetirlo, cambiar `ID_VICTIMA` o usar otro proyecto de Compose. Este script no usa `generar_semilla_maestra()` y no sustituye a la víctima en las pruebas entregadas.
-
 ## 5. Las cuatro pruebas
 
 ### Prueba 1. Cifrado y pago (pasos 1–4, 5a y 6)
 
-Patrón común con `-p p1`, víctima en el puerto `5000`. Después del reinicio:
+Patrón común completo con `-p p1` y `idV = v-p1`. Después del reinicio:
 
 ```powershell
-python victima\victima.py recuperar-pago --id v-p1 --puerto 5000 --entrada evidencias\p1_pago\cifrados --salida evidencias\p1_pago\recuperados
+docker compose -p p1 run --rm victima recuperar-pago --id v-p1 --host servidor --entrada evidencias/p1_pago/cifrados --salida evidencias/p1_pago/recuperados
 docker compose -p p1 logs servidor > evidencias\p1_pago\logs\servidor.log
 ```
 
-En el registro del servidor deben verse, en este orden: `Víctima registrada: v-p1`, `Semilla maestra recibida y guardada para: v-p1`, las líneas de recarga tras el reinicio y `Recuperación por pago simulado para: v-p1`. Terminar con la comparación de la sección 6.
+En la traza del servidor deben verse, en este orden: `Víctima registrada (firma de pkV verificada): v-p1`, `Semilla maestra recibida y guardada para: v-p1`, las líneas de recarga tras el reinicio y `Recuperación por pago simulado para: v-p1`. Terminar con la comparación de la sección 6.
 
 ### Prueba 2. Investigación (paso 5b)
 
-Usa una copia de los cifrados de la prueba 1, con el servidor apagado.
+Usa una copia de los cifrados de la prueba 1, con el servidor apagado. Se ejecuta en el anfitrión.
 
 ```powershell
 docker compose -p p1 stop
-New-Item -ItemType Directory -Force evidencias\p2_investigacion\cifrados, evidencias\p2_investigacion\recuperados | Out-Null
+New-Item -ItemType Directory -Force evidencias\p2_investigacion\cifrados | Out-Null
 Copy-Item evidencias\p1_pago\cifrados\* evidencias\p2_investigacion\cifrados\
 Copy-Item evidencias\p1_pago\originales evidencias\p2_investigacion\ -Recurse   # solo para la comparación final
 
-python investigacion\investigar.py --entrada evidencias\p2_investigacion\cifrados --salida evidencias\p2_investigacion\recuperados --mediciones evidencias\p2_investigacion\mediciones.csv
+python investigacion\investigar.py --entrada evidencias\p2_investigacion\cifrados --salida evidencias\p2_investigacion\recuperados --mediciones evidencias\p2_investigacion\mediciones.csv 2>&1 | Tee-Object evidencias\p2_investigacion\salida.txt
 ```
 
 La investigación solo lee los archivos cifrados y sus metadatos. No accede a `servidor/datos`, al volumen del servidor, a claves privadas ni a los resultados de la prueba 1.
 
-> `investigar.py` recibe `--entrada` (carpeta de cifrados), `--salida` (recuperados) y `--mediciones` (CSV); admite además `--procesos` y `--bits` (por defecto 16 procesos y 24 bits). El `mediciones.csv` registra el entorno, los procesos, el espacio de búsqueda, el archivo oráculo, la semilla encontrada, los candidatos probados y los tiempos de recuperar `sV` y de descifrar.
+`investigar.py` recibe `--entrada`, `--salida` y `--mediciones`, y admite `--procesos` (por defecto, el número de núcleos del equipo) y `--bits` (por defecto 24). El CSV registra el entorno, los procesos, el espacio de búsqueda, el archivo oráculo, la semilla, los candidatos hasta la semilla (`semilla + 1`, porque el recorrido es creciente), su percentil, el esperado y la mediana teóricos, la tasa, el peor caso estimado y los tiempos de recuperar `sV` y de descifrar.
 
 ### Prueba 3. MITM (M1–M6)
 
 ```powershell
 docker compose -p p1 stop
-docker compose -p p3 up --build -d servidor mitm
+docker compose -p p3 --profile cli build
+docker compose -p p3 up -d servidor mitm
 docker compose -p p3 cp servidor:/app/servidor/datos/clave_firma_publica.pem victima\datos\
+docker compose -p p3 run --rm victima preparar --id v-p3
+docker compose -p p3 cp victima\datos\v-p3\clave_firma_publica.pem servidor:/app/servidor/datos/confianza_victimas/v-p3.pem
 ```
 
-La víctima se conecta al intermediario (`--puerto 5001`) y sin comprobar firmas (`--sin-firmas`), como pide M2:
+La víctima se conecta al intermediario y sin comprobar firmas (`--sin-firmas`), como pide M2:
 
 ```powershell
-python victima\victima.py cifrar --id v-p3 --puerto 5001 --sin-firmas --entrada evidencias\p3_mitm\trabajo --salida evidencias\p3_mitm\cifrados
+docker compose -p p3 run --rm victima cifrar --id v-p3 --host mitm --puerto 5001 --sin-firmas --entrada evidencias/p3_mitm/trabajo --salida evidencias/p3_mitm/cifrados
 ```
 
-Al terminar, con víctima y servidor cerrados (M5):
+Al terminar, con víctima y servidor cerrados (M5), y el servidor apagado durante M6:
 
 ```powershell
 docker compose -p p3 logs servidor > evidencias\p3_mitm\logs\servidor.log
-docker compose -p p3 stop servidor
 docker compose -p p3 logs mitm > evidencias\p3_mitm\logs\mitm.log
-# M6: recuperación por el intermediario con la maestra interceptada.
-# Tomar la semilla del log del intermediario (línea "M3: ... sV = <hex>") y descifrar las copias:
-python mitm\mitm.py descifrar --id v-p3 --sv <hex-de-sV> --entrada evidencias\p3_mitm\cifrados --salida evidencias\p3_mitm\recuperados_mitm
+docker compose -p p3 stop
+# M6: el intermediario descifra las copias con la maestra que guardó en mitm\datos\v-p3.json
+python mitm\mitm.py descifrar --id v-p3 --entrada evidencias\p3_mitm\cifrados --salida evidencias\p3_mitm\recuperados
 ```
 
-> El intermediario conserva `skM`, abre la entrega de la víctima, guarda `sV` (la imprime en su traza como `sV = <hex>` y la escribe en `mitm/datos/<idV>.json`) y la re-cifra con la `pkS` real antes de reenviarla al servidor (M3–M4). El subcomando `descifrar` recupera las copias con esa maestra, con el servidor apagado (M6).
+En `mitm.log` se ven la sustitución (`M2: clave pública sustituida (pkS -> pkM)`), la apertura (`M3: maestra interceptada … sV = …`) y el reenvío (`M3: maestra re-cifrada con la pkS real y reenviada.`). La confirmación final es la línea `Semilla maestra recibida y guardada para: v-p3` del servidor.
+
+En esta prueba el servidor también verifica la firma de `pkV`, y la acepta: en el Modelo B el intermediario no necesita tocar `pkV`, solo `pkS`. La defensa que detiene este ataque es la verificación de `pkS` en la víctima (prueba 4).
 
 ### Prueba 4. Firmas digitales
 
 ```powershell
 docker compose -p p3 stop
-docker compose -p p4 up --build -d servidor mitm
+docker compose -p p4 --profile cli build
+docker compose -p p4 up -d servidor mitm
 docker compose -p p4 cp servidor:/app/servidor/datos/clave_firma_publica.pem victima\datos\
+foreach ($ID in "v-p4-mitm", "v-p4-firma-mitm", "v-p4-pkv", "v-p4-legitima") {
+    docker compose -p p4 run --rm victima preparar --id $ID
+    docker compose -p p4 cp "victima\datos\$ID\clave_firma_publica.pem" "servidor:/app/servidor/datos/confianza_victimas/$ID.pem"
+}
 ```
 
-Se ejecuta tres veces, cada una con un `idV` nuevo:
+Se ejecuta cuatro veces, cada una con un `idV` nuevo. La víctima verifica firmas en todos los casos (**no** se usa `--sin-firmas`).
 
-| Caso | idV | Puerto | Resultado esperado |
+| Caso | idV | Intermediario | Resultado esperado |
 |---|---|---|---|
-| Sustitución de clave | `v-p4-mitm` | `5001` | La firma `pks_firma` no verifica con la clave de confianza para `pkM`; la víctima no envía `entrega_semilla` |
-| Firma propia del intermediario | `v-p4-firma-mitm` | `5001` | Rechazo: la firma es del intermediario y no verifica con la clave de confianza copiada en el paso b) |
-| Intercambio legítimo | `v-p4-legitima` | `5000` | Cifrado, reinicio y recuperación por pago completos |
-
-Comandos de la víctima para cada caso (la víctima verifica firmas; **no** se usa `--sin-firmas`):
-
-```powershell
-# Caso 1 — sustitución de clave (intermediario por defecto en 5001): debe RECHAZAR
-python victima\victima.py cifrar --id v-p4-mitm --puerto 5001 --entrada evidencias\p4_firmas\trabajo --salida evidencias\p4_firmas\cifrados_caso1
-
-# Caso 3 — intercambio legítimo (servidor directo en 5000): debe COMPLETAR
-python victima\victima.py cifrar --id v-p4-legitima --puerto 5000 --entrada evidencias\p4_firmas\trabajo --salida evidencias\p4_firmas\cifrados_legitima
-```
-
-Para el **caso 2** el intermediario debe firmar `pkM` con su propia clave. Relanzarlo en ese modo (flag `--firmar-pkm`, equivalente a la variable `MITM_FIRMAR_PKM=1`) y conectar la víctima:
+| 1. Sustitución de `pkS` | `v-p4-mitm` | Modo normal | La víctima rechaza: la firma no corresponde a `pkM`. No envía `entrega_semilla` |
+| 2. Firma propia del intermediario | `v-p4-firma-mitm` | `MITM_FIRMAR_PKM=1` | La víctima rechaza: la firma no verifica con la clave de confianza. No envía `entrega_semilla` |
+| 3. Sustitución de `pkV` | `v-p4-pkv` | `MITM_SUSTITUIR_PKV=1` | El servidor rechaza el registro: la firma de la víctima no cubre `pkM` |
+| 4. Intercambio legítimo | `v-p4-legitima` | (sin intermediario) | Cifrado, reinicio y recuperación por pago completos |
 
 ```powershell
-docker compose -p p4 stop mitm            # liberar el puerto 5001
-$env:SERVIDOR_HOST = "127.0.0.1"; $env:SERVIDOR_PORT = "5000"
-python mitm\mitm.py proxy --firmar-pkm    # intermediario en modo "firma propia" (en el host)
-# en otra terminal:
-python victima\victima.py cifrar --id v-p4-firma-mitm --puerto 5001 --entrada evidencias\p4_firmas\trabajo --salida evidencias\p4_firmas\cifrados_caso2
+# Caso 1: sustitución de pkS -> debe RECHAZAR
+docker compose -p p4 run --rm victima cifrar --id v-p4-mitm --host mitm --puerto 5001 --entrada evidencias/p4_firmas/trabajo --salida evidencias/p4_firmas/cifrados_caso1
+docker compose -p p4 logs mitm > evidencias\p4_firmas\logs\mitm_caso1.log
+
+# Caso 2: el intermediario firma pkM con su propia clave y adjunta su clave de verificación -> debe RECHAZAR
+$env:MITM_FIRMAR_PKM = "1"; docker compose -p p4 up -d --force-recreate mitm; Remove-Item Env:MITM_FIRMAR_PKM
+docker compose -p p4 run --rm victima cifrar --id v-p4-firma-mitm --host mitm --puerto 5001 --entrada evidencias/p4_firmas/trabajo --salida evidencias/p4_firmas/cifrados_caso2
+docker compose -p p4 logs mitm > evidencias\p4_firmas\logs\mitm_caso2.log
+
+# Caso 3: el intermediario sustituye pkV ante el servidor -> el SERVIDOR debe RECHAZAR
+$env:MITM_SUSTITUIR_PKV = "1"; docker compose -p p4 up -d --force-recreate mitm; Remove-Item Env:MITM_SUSTITUIR_PKV
+docker compose -p p4 run --rm victima cifrar --id v-p4-pkv --host mitm --puerto 5001 --entrada evidencias/p4_firmas/trabajo --salida evidencias/p4_firmas/cifrados_caso3
+docker compose -p p4 logs mitm > evidencias\p4_firmas\logs\mitm_caso3.log
+
+# Caso 4: intercambio legítimo, directo al servidor -> debe COMPLETAR cifrado, reinicio y pago
+docker compose -p p4 run --rm victima cifrar --id v-p4-legitima --host servidor --entrada evidencias/p4_firmas/trabajo --salida evidencias/p4_firmas/cifrados
+docker compose -p p4 stop
+docker compose -p p4 start servidor
+docker compose -p p4 run --rm victima recuperar-pago --id v-p4-legitima --host servidor --entrada evidencias/p4_firmas/cifrados --salida evidencias/p4_firmas/recuperados
+docker compose -p p4 logs servidor > evidencias\p4_firmas\logs\servidor.log
 ```
 
-En los dos casos de ataque la víctima rechaza antes de enviar la semilla: en el caso 1 porque el intermediario cambia `pks_n`/`pks_e` pero conserva la firma original del servidor; en el caso 2 porque la víctima verifica contra la clave de confianza del servidor real (copiada en el paso b), no contra la que entrega el intermediario. El registro del servidor debe mostrar `v-p4-mitm` y `v-p4-firma-mitm` **sin** semilla, y `v-p4-legitima` con `Semilla maestra recibida y guardada`.
-
-> Nota: la defensa en sentido contrario (que el servidor autentique la clave de la víctima) no se implementó; no la exige ninguna de las tres pruebas de firmas.
+En los casos 1 y 2 la víctima imprime `RECHAZO: verificar_firma_clave(...) devolvió False. No se envía 'entrega_semilla'.` En el caso 2 imprime además que ignora la clave de verificación adjunta. En el caso 3 el servidor registra `Registro rechazado: Firma de pkV ausente o inválida`. Al final, la traza del servidor muestra `v-p4-mitm` y `v-p4-firma-mitm` registradas **sin** semilla, `v-p4-pkv` rechazada y `v-p4-legitima` con `Semilla maestra recibida y guardada` y `Recuperación por pago simulado`. Para guardar la salida de la víctima de cada caso, añadir `2>&1 | Tee-Object evidencias\p4_firmas\logs\victima_casoN.txt` al comando.
 
 ## 6. Comparar recuperados con originales
 
 ```powershell
-$P = "evidencias\p1_pago"   # cambiar por la carpeta de la prueba
-Get-ChildItem "$P\originales" | ForEach-Object {
-    $o = (Get-FileHash $_.FullName -Algorithm SHA256).Hash
-    $r = (Get-FileHash "$P\recuperados\$($_.Name)" -Algorithm SHA256 -ErrorAction SilentlyContinue).Hash
-    "{0,-20} {1}" -f $_.Name, $(if ($o -eq $r) { "IDENTICO" } else { "DISTINTO o FALTA" })
-} | Tee-Object "$P\comparacion.txt"
+foreach ($P in "evidencias\p1_pago", "evidencias\p2_investigacion", "evidencias\p3_mitm", "evidencias\p4_firmas") {
+    Get-ChildItem "$P\originales" | ForEach-Object {
+        $o = (Get-FileHash $_.FullName -Algorithm SHA256).Hash
+        $r = (Get-FileHash "$P\recuperados\$($_.Name)" -Algorithm SHA256 -ErrorAction SilentlyContinue).Hash
+        "{0,-20} {1}" -f $_.Name, $(if ($o -eq $r) { "IDENTICO" } else { "DISTINTO o FALTA" })
+    } | Tee-Object "$P\comparacion.txt"
+}
 ```
 
 Para una comparación byte a byte: `fc.exe /b original recuperado`.
@@ -279,3 +266,8 @@ docker compose -p p1 down -v   # borra el volumen (solo al terminar la prueba)
 ```
 
 Repetir para `p3` y `p4`. `docker volume ls` muestra los volúmenes que quedan.
+
+## 8. Antes de entregar el ZIP
+
+- Incluir `evidencias\` completa.
+- **No** incluir `.venv\`, `servidor\datos\*.pem`, `victima\datos\*\clave_*privada.pem` ni `mitm\datos\*.json`.
