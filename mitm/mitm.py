@@ -31,6 +31,7 @@ autenticar a quién pertenece), el intermediario -dueño de skM- puede abrir la
 entrega. La defensa es autenticar la clave con firmas (prueba 4).
 """
 
+import re
 import sys
 import json
 import socket
@@ -54,6 +55,7 @@ from comun.crypto_common import (
     descifrar_con_aad,
 )
 from comun.firmas import firmar_clave
+from comun.archivos import nombre_seguro
 
 import os
 
@@ -66,12 +68,17 @@ SERVIDOR_PUERTO = int(os.environ.get("SERVIDOR_PORT", "5000"))
 
 CARPETA_DATOS = Path(__file__).resolve().parent / "datos"
 
+PATRON_ID = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
+
 
 # ---------------------------------------------------------------------------
 # Persistencia de la maestra interceptada
 # ---------------------------------------------------------------------------
 
 def ruta_maestra(id_victima):
+    if not isinstance(id_victima, str) or not PATRON_ID.match(id_victima) \
+            or id_victima in {".", ".."}:
+        raise ValueError(f"idV inválido para nombre de archivo: {id_victima!r}")
     return CARPETA_DATOS / f"{id_victima}.json"
 
 
@@ -100,7 +107,7 @@ def cargar_maestra(id_victima):
 # ---------------------------------------------------------------------------
 
 def procesar_conexion(conexion_victima, direccion, clave_privada_mitm,
-                      clave_firma_mitm=None):
+                      clave_firma_mitm=None, sustituir_pkv=False):
     """Reenvía el protocolo entre víctima y servidor, sustituyendo pkS por pkM
     e interceptando la entrega de la maestra.
 
@@ -123,15 +130,26 @@ def procesar_conexion(conexion_victima, direccion, clave_privada_mitm,
                 if not isinstance(solicitud, dict):
                     return
                 if solicitud.get("tipo") != "registro":
-                    enviar_mensaje(conexion_victima, {
-                        "tipo": "error",
-                        "detalle": "Se esperaba un mensaje de registro.",
-                    })
+                    # Otras operaciones (p. ej. recuperar_pago) se reenvían
+                    # sin cambios: el ataque solo actúa sobre el registro.
+                    reenviar_transparente(
+                        solicitud, conexion_victima, conexion_servidor
+                    )
                     return
 
                 id_victima = solicitud.get("idV")
 
-                # Reenvía el registro (idV y pkV) al servidor sin cambios.
+                if sustituir_pkv:
+                    # Prueba 4, sentido víctima -> servidor: cambia pkV por pkM
+                    # y conserva la firma de la víctima. El servidor debe
+                    # rechazar el registro porque la firma no cubre pkM.
+                    solicitud = dict(solicitud)
+                    clave_mitm_v = exportar_publica(clave_publica_mitm)
+                    solicitud["pkv_n"] = clave_mitm_v["n"]
+                    solicitud["pkv_e"] = clave_mitm_v["e"]
+                    print(f"M2': pkV sustituida por pkM ante el servidor para {id_victima}")
+
+                # Reenvía el registro (idV y pkV) al servidor.
                 enviar_mensaje(conexion_servidor, solicitud)
                 respuesta = recibir_mensaje(conexion_servidor)
                 if not isinstance(respuesta, dict):
@@ -220,6 +238,19 @@ def procesar_conexion(conexion_victima, direccion, clave_privada_mitm,
         print(f"Conexión de laboratorio finalizada: {error}")
 
 
+def reenviar_transparente(primer_mensaje, conexion_victima, conexion_servidor):
+    """Reenvía mensajes en ambos sentidos sin modificarlos."""
+    mensaje = primer_mensaje
+    while mensaje is not None:
+        print(f"Reenvío sin cambios: {mensaje.get('tipo')}")
+        enviar_mensaje(conexion_servidor, mensaje)
+        respuesta = recibir_mensaje(conexion_servidor)
+        if respuesta is None:
+            return
+        enviar_mensaje(conexion_victima, respuesta)
+        mensaje = recibir_mensaje(conexion_victima)
+
+
 def ejecutar_proxy(args):
     # El par de cifrado del intermediario vive solo en memoria.
     clave_privada_mitm, _ = generar_par_rsa(2048)
@@ -231,6 +262,11 @@ def ejecutar_proxy(args):
     if firmar:
         clave_firma_mitm, _ = generar_par_rsa(2048)
         print("Modo caso 2: el intermediario firmará pkM con su propia clave de firma.")
+
+    sustituir_pkv = (getattr(args, "sustituir_pkv", False)
+                     or os.environ.get("MITM_SUSTITUIR_PKV") == "1")
+    if sustituir_pkv:
+        print("Modo sustitución de pkV: el servidor debe rechazar el registro.")
 
     escucha = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     escucha.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -245,7 +281,8 @@ def ejecutar_proxy(args):
             conexion, direccion = escucha.accept()
             hilo = Thread(
                 target=procesar_conexion,
-                args=(conexion, direccion, clave_privada_mitm, clave_firma_mitm),
+                args=(conexion, direccion, clave_privada_mitm, clave_firma_mitm,
+                      sustituir_pkv),
                 daemon=True,
             )
             hilo.start()
@@ -302,7 +339,7 @@ def ejecutar_descifrar(args):
             fallidos.append(c["nombre_original"])
             print(f"  [i={c['i']}] {c['nombre_original']}: ETIQUETA INVÁLIDA")
             continue
-        (carpeta_salida / c["nombre_original"]).write_bytes(claro)
+        (carpeta_salida / nombre_seguro(c["nombre_original"])).write_bytes(claro)
         recuperados += 1
         print(f"  [i={c['i']}] {c['nombre_original']}: OK")
 
@@ -326,6 +363,11 @@ def construir_parser():
         "--firmar-pkm", action="store_true",
         help="Prueba 4, caso 2: firmar pkM con la clave de firma propia del "
              "intermediario (equivale a MITM_FIRMAR_PKM=1).",
+    )
+    p_proxy.add_argument(
+        "--sustituir-pkv", action="store_true",
+        help="Prueba 4: sustituir pkV por pkM ante el servidor "
+             "(equivale a MITM_SUSTITUIR_PKV=1).",
     )
     p_proxy.set_defaults(func=ejecutar_proxy)
 

@@ -1,33 +1,54 @@
-
 services:
   servidor:
     build:
       context: .
       dockerfile: servidor/Dockerfile
-
     ports:
       - "127.0.0.1:5000:5000"
-
     volumes:
       - servidor_datos:/app/servidor/datos
-
+    networks:
+      - laboratorio
     restart: unless-stopped
 
   mitm:
     build:
       context: .
       dockerfile: mitm/Dockerfile
-
     environment:
       SERVIDOR_HOST: servidor
       SERVIDOR_PORT: "5000"
       MITM_PORT: "5001"
-
+      # Prueba 4, caso 2: MITM_FIRMAR_PKM=1 al recrear el servicio
+      MITM_FIRMAR_PKM: "${MITM_FIRMAR_PKM:-0}"
+      # Prueba 4, sentido víctima -> servidor: MITM_SUSTITUIR_PKV=1
+      MITM_SUSTITUIR_PKV: "${MITM_SUSTITUIR_PKV:-0}"
     ports:
       - "127.0.0.1:5001:5001"
-
+    volumes:
+      # La maestra interceptada (M3) queda en el anfitrión para M6
+      - ./mitm/datos:/app/mitm/datos
+    networks:
+      - laboratorio
     depends_on:
       - servidor
+
+  # La víctima es un cliente de terminal: no arranca con "up", se ejecuta con
+  #   docker compose -p <proyecto> run --rm victima <subcomando> ...
+  victima:
+    build:
+      context: .
+      dockerfile: victima/Dockerfile
+    profiles: ["cli"]
+    volumes:
+      - ./victima/datos:/app/victima/datos
+      - ./evidencias:/app/evidencias
+    networks:
+      - laboratorio
+
+# Red interna del laboratorio: víctima, intermediario y servidor
+networks:
+  laboratorio:
 
 volumes:
   servidor_datos:

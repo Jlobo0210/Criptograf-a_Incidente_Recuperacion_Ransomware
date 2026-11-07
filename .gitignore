@@ -36,7 +36,10 @@ ENV/
 # ==============================
 servidor/datos/*
 !servidor/datos/.gitkeep
-mitm/datos/
+mitm/datos/*
+!mitm/datos/.gitkeep
+victima/datos/*
+!victima/datos/.gitkeep
 state/
 *.sqlite3
 *.db

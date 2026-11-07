@@ -6,13 +6,22 @@ from comun.crypto_common import generar_par_rsa, exportar_publica, reconstruir_p
 from comun.firmas import (
     cargar_clave_publica_pem,
     verificar_firma_clave,
+    firmar_clave,
+)
+from victima.victima import (
+    cargar_o_generar_clave_victima,
+    cargar_o_generar_clave_firma_victima,
 )
 from pathlib import Path
 
 
 
+# Antes de ejecutar: python victima/victima.py preparar --id v-prueba-003
+# y copiar victima/datos/v-prueba-003/clave_firma_publica.pem al servidor
+# como confianza_victimas/v-prueba-003.pem (ver README).
 ID_VICTIMA = "v-prueba-003"
-priv_victima, pub_victima = generar_par_rsa(2048)
+priv_victima, pub_victima = cargar_o_generar_clave_victima(ID_VICTIMA)
+firma_victima = cargar_o_generar_clave_firma_victima(ID_VICTIMA)
 
 conexion = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 conexion.connect(("127.0.0.1", 5000))
@@ -21,6 +30,7 @@ conexion.connect(("127.0.0.1", 5000))
 enviar_mensaje(conexion, {
     "tipo": "registro", "idV": ID_VICTIMA,
     **{f"pkv_{k}": v for k, v in exportar_publica(pub_victima).items()},
+    "pkv_firma": firmar_clave(firma_victima, "victima", ID_VICTIMA, pub_victima),
 })
 respuesta = recibir_mensaje(conexion)
 print("Registro:", respuesta)
@@ -62,7 +72,7 @@ if not firma_valida:
 print("Firma del servidor verificada correctamente.")
 
 
-# 2. Entrega de la semilla maestra (aquí simulada; luego será generar_semilla_maestra())
+# 2. Entrega de una semilla de prueba (la víctima real usa generar_semilla_maestra())
 sV = secrets.token_bytes(32)
 encapsulacion = encapsular_oaep(pk_servidor, sV)
 enviar_mensaje(conexion, {

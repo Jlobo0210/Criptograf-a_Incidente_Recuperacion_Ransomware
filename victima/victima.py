@@ -4,6 +4,9 @@ victima/victima.py
 Rol: víctima del Modelo B.
 
 Dos subcomandos:
+  preparar        Genera el par RSA de cifrado y el par de firma de la víctima
+                  (antes del intercambio) para copiar la clave de verificación
+                  al servidor por un canal de confianza.
   cifrar          Registro, entrega de la semilla maestra sV al servidor
                   (OAEP) y cifrado de los archivos de trabajo (pasos 1-3).
   recuperar-pago  Recuperación de sV por pago (5a) y descifrado de los
@@ -14,6 +17,7 @@ claves Ki ni la entrega OAEP inicial: tras un reinicio solo quedan en disco
 el par RSA, el idV y los archivos cifrados (enunciado, paso 4).
 """
 
+import os
 import sys
 import re
 import json
@@ -37,8 +41,13 @@ from comun.crypto_common import (
     cifrar_con_aad,
     descifrar_con_aad,
 )
-from comun.firmas import cargar_clave_publica_pem, verificar_firma_clave
+from comun.firmas import (
+    cargar_clave_publica_pem,
+    verificar_firma_clave,
+    firmar_clave,
+)
 from comun.generador_semillas import generar_semilla_maestra
+from comun.archivos import nombre_seguro
 
 from Crypto.PublicKey import RSA
 
@@ -56,7 +65,7 @@ PATRON_ID = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
 # ---------------------------------------------------------------------------
 
 def validar_id(id_victima):
-    if not PATRON_ID.match(id_victima):
+    if not PATRON_ID.match(id_victima) or id_victima in {".", ".."}:
         raise ValueError(
             "idV inválido: use solo letras, dígitos, '.', '_' o '-' "
             "(1 a 64 caracteres)."
@@ -66,6 +75,46 @@ def validar_id(id_victima):
 
 def ruta_clave_victima(id_victima):
     return CARPETA_DATOS / id_victima / "clave_privada.pem"
+
+
+def ruta_firma_privada(id_victima):
+    return CARPETA_DATOS / id_victima / "clave_firma_privada.pem"
+
+
+def ruta_firma_publica(id_victima):
+    return CARPETA_DATOS / id_victima / "clave_firma_publica.pem"
+
+
+def escribir_privada(ruta, clave_privada):
+    """Crea el archivo sin sobrescribir y restringe permisos (POSIX)."""
+    ruta.parent.mkdir(parents=True, exist_ok=True)
+    with open(ruta, "xb") as archivo:
+        archivo.write(clave_privada.export_key())
+    try:
+        os.chmod(ruta, 0o600)
+    except OSError:
+        pass  # En Windows los permisos POSIX pueden no aplicarse.
+
+
+def cargar_o_generar_clave_firma_victima(id_victima):
+    """Par RSA de FIRMA de la víctima, independiente del de cifrado.
+
+    Su clave pública se copia al servidor (confianza_victimas/<idV>.pem)
+    antes del registro; con ella el servidor autentica pkV.
+    """
+    ruta = ruta_firma_privada(id_victima)
+
+    if ruta.exists():
+        privada = RSA.import_key(ruta.read_bytes())
+        if not privada.has_private():
+            raise ValueError("La clave de firma de la víctima no es privada.")
+        return privada
+
+    privada, publica = generar_par_rsa(2048)
+    escribir_privada(ruta, privada)
+    ruta_firma_publica(id_victima).write_bytes(publica.export_key())
+    print(f"Par de firma de la víctima generado para: {id_victima}")
+    return privada
 
 
 def cargar_o_generar_clave_victima(id_victima):
@@ -85,10 +134,8 @@ def cargar_o_generar_clave_victima(id_victima):
             raise ValueError("La clave RSA de la víctima debe tener >= 2048 bits.")
         return clave_privada, clave_privada.publickey()
 
-    ruta.parent.mkdir(parents=True, exist_ok=True)
     clave_privada, clave_publica = generar_par_rsa(2048)
-    with open(ruta, "xb") as archivo:
-        archivo.write(clave_privada.export_key())
+    escribir_privada(ruta, clave_privada)
     print(f"Par RSA de la víctima generado y guardado para: {id_victima}")
     return clave_privada, clave_publica
 
@@ -134,14 +181,17 @@ def esperar_respuesta(conexion, tipo_esperado):
     return respuesta
 
 
-def registrar(conexion, id_victima, clave_publica_victima):
-    """Paso 1: envía el registro y devuelve la respuesta registro_ok."""
+def registrar(conexion, id_victima, clave_publica_victima, clave_firma_victima):
+    """Paso 1: envía el registro (con pkV firmada) y devuelve registro_ok."""
     pkv = exportar_publica(clave_publica_victima)
     enviar_mensaje(conexion, {
         "tipo": "registro",
         "idV": id_victima,
         "pkv_n": pkv["n"],
         "pkv_e": pkv["e"],
+        "pkv_firma": firmar_clave(
+            clave_firma_victima, "victima", id_victima, clave_publica_victima
+        ),
     })
     return esperar_respuesta(conexion, "registro_ok")
 
@@ -169,6 +219,10 @@ def obtener_clave_servidor(respuesta_registro, id_victima, verificar_firmas):
             "--sin-firmas para la prueba de MITM."
         )
 
+    if "pks_firma_pub_n" in respuesta_registro:
+        print("AVISO: la respuesta trae su propia clave de verificación; "
+              "se ignora y se usa solo la clave de confianza local.")
+
     clave_confianza = cargar_clave_publica_pem(RUTA_CLAVE_CONFIANZA)
     firma_valida = verificar_firma_clave(
         clave_confianza,
@@ -178,6 +232,9 @@ def obtener_clave_servidor(respuesta_registro, id_victima, verificar_firmas):
         respuesta_registro.get("pks_firma"),
     )
     if not firma_valida:
+        print("RECHAZO: verificar_firma_clave(clave de confianza, 'servidor', "
+              f"'{id_victima}', pkS recibida, pks_firma) devolvió False. "
+              "No se envía 'entrega_semilla'.")
         return None
 
     print("Firma de la clave del servidor verificada correctamente.")
@@ -225,6 +282,19 @@ def leer_cifrado(ruta):
 
 
 # ---------------------------------------------------------------------------
+# Subcomando: preparar (antes del paso 1)
+# ---------------------------------------------------------------------------
+
+def comando_preparar(args):
+    id_victima = validar_id(args.id)
+    cargar_o_generar_clave_victima(id_victima)
+    cargar_o_generar_clave_firma_victima(id_victima)
+    print(f"Clave de verificación de la víctima: {ruta_firma_publica(id_victima)}")
+    print("Cópiela al servidor como confianza_victimas/"
+          f"{id_victima}.pem ANTES de ejecutar 'cifrar'.")
+
+
+# ---------------------------------------------------------------------------
 # Subcomando: cifrar (pasos 1-3)
 # ---------------------------------------------------------------------------
 
@@ -244,11 +314,14 @@ def comando_cifrar(args):
     clave_privada_victima, clave_publica_victima = (
         cargar_o_generar_clave_victima(id_victima)
     )
+    clave_firma_victima = cargar_o_generar_clave_firma_victima(id_victima)
 
     conexion = conectar(args.host, args.puerto)
     try:
-        # Paso 1: registro y obtención de pkS.
-        respuesta_registro = registrar(conexion, id_victima, clave_publica_victima)
+        # Paso 1: registro (pkV firmada) y obtención de pkS.
+        respuesta_registro = registrar(
+            conexion, id_victima, clave_publica_victima, clave_firma_victima
+        )
 
         pk_servidor = obtener_clave_servidor(
             respuesta_registro, id_victima, verificar_firmas=not args.sin_firmas
@@ -344,7 +417,7 @@ def comando_recuperar_pago(args):
             fallidos.append(datos["nombre_original"])
             print(f"  [i={datos['i']}] {datos['nombre_original']}: ETIQUETA INVÁLIDA, rechazado")
             continue
-        (carpeta_salida / datos["nombre_original"]).write_bytes(claro)
+        (carpeta_salida / nombre_seguro(datos["nombre_original"])).write_bytes(claro)
         recuperados += 1
         print(f"  [i={datos['i']}] {datos['nombre_original']}: OK")
 
@@ -369,6 +442,13 @@ def construir_parser():
     comun.add_argument("--puerto", type=int, default=5000, help="Puerto del servidor o del MITM.")
     comun.add_argument("--entrada", required=True, help="Carpeta de entrada.")
     comun.add_argument("--salida", required=True, help="Carpeta de salida.")
+
+    p_prep = sub.add_parser(
+        "preparar",
+        help="Genera los pares RSA de cifrado y de firma de la víctima.",
+    )
+    p_prep.add_argument("--id", required=True, help="Identificador de la víctima (idV).")
+    p_prep.set_defaults(func=comando_preparar)
 
     p_cifrar = sub.add_parser(
         "cifrar", parents=[comun],

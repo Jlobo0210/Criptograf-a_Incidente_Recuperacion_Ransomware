@@ -98,7 +98,8 @@ def verificar_firma_clave(
 
 def cargar_clave_publica_pem(ruta):
     """Carga una clave pública de confianza desde un archivo PEM."""
-    clave = RSA.import_key(open(ruta, "rb").read())
+    with open(ruta, "rb") as archivo:
+        clave = RSA.import_key(archivo.read())
 
     if clave.has_private():
         return clave.publickey()

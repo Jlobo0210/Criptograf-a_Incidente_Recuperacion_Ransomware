@@ -6,4 +6,6 @@ __pycache__/
 .env
 pruebas/
 state/
-servidor/datos/
+servidor/datos/victima/datos/
+mitm/datos/
+evidencias/
