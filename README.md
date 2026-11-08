@@ -30,7 +30,7 @@ investigacion/
 pruebas/
   test_firmas.py                  Firma de pkS (víctima autentica al servidor)
   test_autenticacion_victima.py   Firma de pkV (servidor autentica a la víctima) y nombres seguros
-scratch_cliente_prueba.py Cliente mínimo para probar el servidor sin la víctima
+correr_pruebas.ps1        Ejecuta las cuatro pruebas y guarda las evidencias
 docker-compose.yml        Servicios servidor, mitm y victima en la red interna "laboratorio"
 requirements.txt          pycryptodome==3.23.0
 evidencias/               Resultados de cada prueba (se crea al preparar las pruebas)
@@ -52,6 +52,7 @@ python --version
 Todos los comandos se ejecutan en PowerShell desde la carpeta que contiene `docker-compose.yml`.
 
 ```powershell
+Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass   # permite activar el entorno y correr el script
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python -m pip install -r requirements.txt
@@ -128,15 +129,15 @@ docker compose -p p1 logs servidor
 
 Subcomandos de `victima.py`: `preparar --id` (genera el par de cifrado y el de firma), `cifrar` (pasos 1–3) y `recuperar-pago` (5a y 6), con `--id`, `--host` (por defecto `127.0.0.1`), `--puerto` (por defecto `5000`), `--entrada`, `--salida` y, solo en la prueba de MITM, `--sin-firmas`.
 
-### Comprobar el servidor sin la víctima
+## 5. Las cuatro pruebas
 
-`scratch_cliente_prueba.py` hace el recorrido completo contra el servidor (registro firmado, verificación de `pkS`, entrega de una semilla de prueba y pago). Requiere el paso b) y, para `v-prueba-003`, el paso c) con `python victima\victima.py preparar --id v-prueba-003` y la copia de su clave al servidor. Solo funciona una vez por volumen, porque el servidor acepta una sola entrega por `idV`.
+Para ejecutar las cuatro pruebas de una sola vez y guardar todas las evidencias (borra las evidencias y los volúmenes anteriores de `p1`, `p3` y `p4`):
 
 ```powershell
-python scratch_cliente_prueba.py
+.\correr_pruebas.ps1
 ```
 
-## 5. Las cuatro pruebas
+Las secciones siguientes explican cada prueba paso a paso, con los mismos comandos que usa el script.
 
 ### Prueba 1. Cifrado y pago (pasos 1–4, 5a y 6)
 
