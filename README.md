@@ -36,6 +36,8 @@ requirements.txt          pycryptodome==3.23.0
 evidencias/               Resultados de cada prueba (se crea al preparar las pruebas)
 ```
 
+victima/datos/ y mitm/datos/ contienen las claves y la maestra interceptada de la ejecución final, generadas solo para este laboratorio.
+
 ## 1. Requisitos
 
 - Docker Desktop en ejecución, con `docker compose`.
