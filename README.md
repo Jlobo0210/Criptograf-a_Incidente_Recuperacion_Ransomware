@@ -267,8 +267,3 @@ docker compose -p p1 down -v   # borra el volumen (solo al terminar la prueba)
 ```
 
 Repetir para `p3` y `p4`. `docker volume ls` muestra los volúmenes que quedan.
-
-## 8. Antes de entregar el ZIP
-
-- Incluir `evidencias\` completa.
-- **No** incluir `.venv\`, `servidor\datos\*.pem`, `victima\datos\*\clave_*privada.pem` ni `mitm\datos\*.json`.
